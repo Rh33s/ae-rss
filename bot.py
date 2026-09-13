@@ -683,12 +683,17 @@ class TelegramPublisher:
 
         parts = []
 
+        MAX_TOTAL_MEDIA = 10
+        media_count = 0
+
         # 1. Top Slideshow: Front Cover and Back Cover at very top
         slides = []
-        if hd_front:
+        if hd_front and media_count < MAX_TOTAL_MEDIA:
             slides.append(f'<img src="{hd_front}"/>')
-        if hd_back:
+            media_count += 1
+        if hd_back and media_count < MAX_TOTAL_MEDIA:
             slides.append(f'<img src="{hd_back}"/>')
+            media_count += 1
 
         if slides:
             parts.append("<tg-slideshow>")
@@ -739,14 +744,21 @@ class TelegramPublisher:
                 # Collapsible section to hide starring cast and thumbnails
                 even_caps = [sc_caps[i] for i in [1, 3, 5, 7] if i < len(sc_caps)] or sc_caps[1::2] or sc_caps
                 has_cast = bool(sc_cast_str and not is_generic)
-                if has_cast or even_caps:
-                    summary = "Starring &amp; Screenshots" if (has_cast and even_caps) else ("Starring" if has_cast else "Screenshots")
+
+                caps_to_add = []
+                remaining_media = MAX_TOTAL_MEDIA - media_count
+                if remaining_media > 0 and even_caps:
+                    caps_to_add = even_caps[:min(MAX_SCENE_CAPS, remaining_media)]
+                    media_count += len(caps_to_add)
+
+                if has_cast or caps_to_add:
+                    summary = "Starring &amp; Screenshots" if (has_cast and caps_to_add) else ("Starring" if has_cast else "Screenshots")
                     details_html = [f"<details><summary>{summary}</summary>"]
                     if has_cast:
                         details_html.append(f"<p><b>Starring:</b> {sc_cast_str}</p>")
-                    if even_caps:
+                    if caps_to_add:
                         details_html.append("<tg-slideshow>")
-                        for c_url in even_caps[:MAX_SCENE_CAPS]:
+                        for c_url in caps_to_add:
                             details_html.append(f'<img src="{self.esc(c_url)}"/>')
                         details_html.append("</tg-slideshow>")
                     details_html.append("</details>")
@@ -754,80 +766,102 @@ class TelegramPublisher:
 
         return "\n".join(parts)
 
-    def build_standard_caption(self, item: Dict[str, Any]) -> str:
-        """Fallback caption formatted for sendMediaGroup / sendPhoto / sendMessage."""
-        title = self.esc(format_title(item.get("title", "New Release")))
-        link = self.esc(item.get("link", ""))
-        studio = self.esc(item.get("studio"))
-        date = self.esc(item.get("pub_date"))
+    def build_standard_caption(self, item: Dict[str, Any], max_len: int = 1024) -> str:
+        """
+        Builds a strictly valid HTML caption for Telegram media messages (<= 1024 characters).
+        Ensures HTML tags are fully balanced and never sliced mid-tag.
+        """
+        raw_title = format_title(item.get("title", "New Release"))
+        link = item.get("link", "").strip()
+        studio = item.get("studio", "").strip() if item.get("studio") else ""
+        date = item.get("pub_date", "").strip() if item.get("pub_date") else ""
         scenes = item.get("scenes", [])
 
-        header = [
-            f'<a href="{link}"><b>{title}</b></a>' if link else f"<b>{title}</b>"
+        # 1. Base header lines
+        if len(raw_title) > 200:
+            raw_title = raw_title[:197].rstrip() + "…"
+        esc_title = self.esc(raw_title)
+        esc_link = self.esc(link)
+
+        header_lines = [
+            f'<a href="{esc_link}"><b>{esc_title}</b></a>' if esc_link else f"<b>{esc_title}</b>"
         ]
-        if studio and studio.lower() not in title.lower():
-            header.append(f"<b>Studio:</b> {studio}")
+        if studio and studio.lower() not in raw_title.lower():
+            header_lines.append(f"<b>Studio:</b> {self.esc(studio)}")
         if date:
-            header.append(f"<b>Released:</b> {date}")
+            header_lines.append(f"<b>Released:</b> {self.esc(date)}")
 
-        scene_lines = []
-        if scenes:
-            scene_lines.append("")
-            for idx, sc in enumerate(scenes, 1):
-                sc_title = self.esc(sc["title"])
-                sc_url = self.esc(sc["url"])
-                sc_cast = sc.get("cast", [])
-                sc_cast_str = ", ".join([self.esc(c) for c in sc_cast])
+        base_header = "\n".join(header_lines)
+        if not scenes:
+            return base_header[:max_len]
 
-                is_generic = bool(re.match(r"^(Scene\s*\d*|Chapter\s*\d*)$", sc_title, re.IGNORECASE))
-                if is_generic and sc_cast_str:
-                    display_title = sc_cast_str
-                elif re.match(r"^(Scene|Chapter)\s*\d+[:\s-]*(.*)", sc_title, re.IGNORECASE):
-                    m = re.match(r"^(Scene|Chapter)\s*\d+[:\s-]*(.*)", sc_title, re.IGNORECASE)
-                    rest = m.group(2).strip()
-                    display_title = rest if rest else f"Scene {idx}"
-                else:
-                    display_title = sc_title
-
-                if display_title.lower() in [f"scene {idx}".lower(), f"scene{idx}".lower(), "scene"]:
-                    scene_label = f"Scene {idx}"
-                else:
-                    scene_label = f"Scene {idx}: {display_title}"
-
-                scene_lines.append(f'<a href="{sc_url}"><b>{scene_label}</b></a>')
-                if sc_cast_str and not is_generic:
-                    scene_lines.append(f"<b>Starring:</b> {sc_cast_str}")
-
-        caption = "\n".join(header + scene_lines)
-        if len(caption) <= 1024:
-            return caption
-
-        # If caption exceeds 1024, omit starring lines to ensure ALL scenes are preserved
-        compact_lines = []
+        # 2. Try adding full scene info (with starring) if budget permits
+        full_scene_blocks: List[str] = []
         for idx, sc in enumerate(scenes, 1):
-            sc_title = self.esc(sc["title"])
-            sc_url = self.esc(sc["url"])
+            sc_title = sc.get("title", "")
+            sc_url = sc.get("url", "")
+            sc_cast = sc.get("cast", [])
+            sc_cast_str = ", ".join(sc_cast)
+
+            is_generic = bool(re.match(r"^(Scene\s*\d*|Chapter\s*\d*)$", sc_title, re.IGNORECASE))
+            if is_generic and sc_cast_str:
+                display_title = sc_cast_str
+            elif re.match(r"^(Scene|Chapter)\s*\d+[:\s-]*(.*)", sc_title, re.IGNORECASE):
+                m = re.match(r"^(Scene|Chapter)\s*\d+[:\s-]*(.*)", sc_title, re.IGNORECASE)
+                rest = m.group(2).strip()
+                display_title = rest if rest else f"Scene {idx}"
+            else:
+                display_title = sc_title
+
+            if display_title.lower() in [f"scene {idx}".lower(), f"scene{idx}".lower(), "scene"]:
+                scene_label = f"Scene {idx}"
+            else:
+                scene_label = f"Scene {idx}: {display_title}"
+
+            esc_sc_url = self.esc(sc_url)
+            esc_label = self.esc(scene_label)
+
+            line = f'<a href="{esc_sc_url}"><b>{esc_label}</b></a>' if esc_sc_url else f"<b>{esc_label}</b>"
+            if sc_cast_str and not is_generic:
+                line += f"\n<b>Starring:</b> {self.esc(sc_cast_str)}"
+            full_scene_blocks.append(line)
+
+        full_candidate = base_header + "\n\n" + "\n".join(full_scene_blocks)
+        if len(full_candidate) <= max_len:
+            return full_candidate
+
+        # 3. Compact mode: compact scene links only
+        compact_blocks: List[str] = []
+        for idx, sc in enumerate(scenes, 1):
+            sc_title = sc.get("title", "")
+            sc_url = sc.get("url", "")
             if sc_title.lower() in [f"scene {idx}".lower(), f"scene{idx}".lower(), "scene"]:
                 c_label = f"Scene {idx}"
             else:
                 c_label = f"Scene {idx}: {sc_title}"
-            compact_lines.append(f'<a href="{sc_url}"><b>{c_label}</b></a>')
-        caption = "\n".join(header + [""] + compact_lines)
-        if len(caption) <= 1024:
-            return caption
 
-        # Shorten title if necessary so all 4 scenes remain
-        budget = 1024 - (len("\n".join(compact_lines)) + (len(date) + 30 if date else 0) + 50)
-        if budget > 20 and link:
-            truncated_title = title[:budget].rstrip() + "…"
-            header = [f'<a href="{link}"><b>{truncated_title}</b></a>']
-            if date:
-                header.append(f"<b>Released:</b> {date}")
-            caption = "\n".join(header + [""] + compact_lines)
-            if len(caption) <= 1024:
-                return caption
+            esc_sc_url = self.esc(sc_url)
+            esc_c_label = self.esc(c_label)
+            line = f'<a href="{esc_sc_url}"><b>{esc_c_label}</b></a>' if esc_sc_url else f"<b>{esc_c_label}</b>"
+            compact_blocks.append(line)
 
-        return caption[:1020]
+        accepted_scenes: List[str] = []
+        base_prefix = base_header + "\n\n"
+        for idx, line in enumerate(compact_blocks):
+            remaining = len(compact_blocks) - (idx + 1)
+            suffix = f"\n<i>...and {remaining} more scenes</i>" if remaining > 0 else ""
+            test_caption = base_prefix + "\n".join(accepted_scenes + [line]) + suffix
+            if len(test_caption) <= max_len:
+                accepted_scenes.append(line)
+            else:
+                break
+
+        if accepted_scenes:
+            remaining = len(compact_blocks) - len(accepted_scenes)
+            suffix = f"\n<i>...and {remaining} more scenes</i>" if remaining > 0 else ""
+            return base_prefix + "\n".join(accepted_scenes) + suffix
+
+        return base_header
 
     def build_slideshow_media(self, item: Dict[str, Any], caption: str) -> List[Dict[str, Any]]:
         """Builds multi-photo media group for sendMediaGroup fallback."""
@@ -911,8 +945,19 @@ class TelegramPublisher:
                     },
                     timeout=25
                 )
-                if resp.json().get("ok"):
+                res = resp.json()
+                if res.get("ok"):
                     logger.info(f"Posted single photo for item '{item['id']}'.")
+                    return True
+                logger.warning(f"sendPhoto notice ({res.get('description')}). Retrying with plain text.")
+                clean_text = re.sub(r"<[^>]+>", "", standard_caption)
+                resp2 = requests.post(
+                    f"{self.base_url}/sendPhoto",
+                    data={"chat_id": self.chat_id, "photo": front_img, "caption": clean_text[:1024]},
+                    timeout=25
+                )
+                if resp2.json().get("ok"):
+                    logger.info(f"Posted single photo (plain text) for item '{item['id']}'.")
                     return True
             except Exception as e:
                 logger.warning(f"sendPhoto error: {e}.")
@@ -929,8 +974,18 @@ class TelegramPublisher:
                 },
                 timeout=25
             )
-            if resp.json().get("ok"):
+            res = resp.json()
+            if res.get("ok"):
                 logger.info(f"Posted text message for item '{item['id']}'.")
+                return True
+            clean_text = re.sub(r"<[^>]+>", "", standard_caption)
+            resp2 = requests.post(
+                f"{self.base_url}/sendMessage",
+                data={"chat_id": self.chat_id, "text": clean_text[:4000]},
+                timeout=25
+            )
+            if resp2.json().get("ok"):
+                logger.info(f"Posted text message (plain text) for item '{item['id']}'.")
                 return True
         except Exception as e:
             logger.error(f"sendMessage error: {e}")
