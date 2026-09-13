@@ -1,0 +1,15 @@
+# Environments and local secrets
+.env
+.env.*
+!.env.example
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.DS_Store
+
+# Keep data directory and history tracked
+!data/
+!data/history.json
