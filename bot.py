@@ -1001,7 +1001,11 @@ def run_once(args) -> None:
             logger.info(f"Initial run: Broadcasting ALL {len(new_items)} feed items without limit.")
             to_broadcast = new_items
     else:
-        to_broadcast = new_items[:args.limit] if args.limit > 0 else new_items
+        to_broadcast = new_items
+
+    if args.limit > 0 and len(to_broadcast) > args.limit:
+        logger.info(f"Applying run limit: capping broadcast to {args.limit} items.")
+        to_broadcast = to_broadcast[:args.limit]
 
     to_broadcast.reverse()
 
@@ -1048,9 +1052,11 @@ def main():
     parser.add_argument("--limit", type=int, default=MAX_POSTS_PER_RUN, help="Maximum new items to post")
     parser.add_argument(
         "--loop",
+        nargs="?",
+        const=int(os.getenv("POLL_INTERVAL_SECONDS", "1800")),
         type=int,
-        default=int(os.getenv("POLL_INTERVAL_SECONDS", "0")),
-        help="Polling interval in seconds for continuous background worker mode (0 = run once and exit)",
+        default=0,
+        help="Polling interval in seconds for continuous background worker mode (e.g. --loop or --loop 1800). Default is single run.",
     )
     args = parser.parse_args()
 
