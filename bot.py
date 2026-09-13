@@ -1045,7 +1045,43 @@ def run_once(args) -> None:
     history.save()
 
 
+def _start_health_server_if_needed() -> None:
+    """Starts a minimal background HTTP health check server if PORT is defined (e.g. Render Web Service)."""
+    port_str = os.getenv("PORT", "").strip()
+    if not port_str:
+        return
+    try:
+        port = int(port_str)
+    except ValueError:
+        return
+
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status": "ok", "service": "ae-rss-bot"}\n')
+
+        def log_message(self, format, *args):
+            pass
+
+    def _serve():
+        try:
+            httpd = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+            logger.info(f"Port detector health server listening on 0.0.0.0:{port} for Render/platform health checks.")
+            httpd.serve_forever()
+        except Exception as e:
+            logger.warning(f"Could not bind health server to port {port}: {e}")
+
+    t = threading.Thread(target=_serve, daemon=True, name="RenderHealthDetector")
+    t.start()
+
+
 def main():
+    _start_health_server_if_needed()
     parser = argparse.ArgumentParser(description="RSS Telegram Bot with Rich Messages & Slideshows")
     parser.add_argument("--dry-run", action="store_true", help="Log output without dispatching to Telegram")
     parser.add_argument("--seed-only", action="store_true", help="Record current feed items without posting")

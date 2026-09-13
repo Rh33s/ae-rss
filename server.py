@@ -53,7 +53,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("clean_xml_server")
 
-PORT = int(os.getenv("PORT", os.getenv("SERVER_PORT", "8080")))
+PORT = int(os.getenv("PORT", os.getenv("SERVER_PORT", "10000")))
 HOST = os.getenv("HOST", "0.0.0.0")
 CACHE_TTL = int(os.getenv("FEED_CACHE_TTL", "300"))  # 5 minutes default cache
 
@@ -66,7 +66,13 @@ class FeedCache:
         self.cached_xml: Optional[str] = None
         self.cached_items: List[Dict[str, Any]] = []
         self.last_fetch: float = 0
-        self.scraper = bot.FeedScraper()
+        self._scraper: Optional[bot.FeedScraper] = None
+
+    @property
+    def scraper(self) -> bot.FeedScraper:
+        if self._scraper is None:
+            self._scraper = bot.FeedScraper()
+        return self._scraper
 
     def is_valid(self) -> bool:
         return bool(self.cached_xml and (time.time() - self.last_fetch) < self.ttl)
