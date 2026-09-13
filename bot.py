@@ -96,6 +96,12 @@ MAX_HISTORY_SIZE = int(os.getenv("MAX_HISTORY_SIZE", "1000"))
 MAX_CAPS_IN_SLIDESHOW = int(os.getenv("MAX_CAPS_IN_SLIDESHOW", "6"))
 MAX_SCENE_CAPS = int(os.getenv("MAX_SCENE_CAPS", "4"))
 POST_DELAY_SECONDS = float(os.getenv("POST_DELAY_SECONDS", "5.0"))
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "1800"))
+
+# GitHub Gist remote persistence settings (for Render / ephemeral hosts)
+GIST_ID = os.getenv("GIST_ID", "").strip()
+GIST_TOKEN = os.getenv("GIST_TOKEN", "").strip() or os.getenv("GITHUB_TOKEN", "").strip()
+GIST_FILENAME = os.getenv("GIST_FILENAME", "history.json").strip()
 
 REQUEST_HEADERS = {
     "User-Agent": (
@@ -428,13 +434,166 @@ class FeedScraper:
 
 
 class HistoryManager:
-    """Maintains persistent state of sent items in a JSON file."""
+    """
+    Maintains persistent state of sent items.
+    Supports GitHub Gist synchronization (remote persistence for Render/serverless)
+    with local filesystem fallback and caching.
+    """
 
-    def __init__(self, filepath: str):
+    def __init__(
+        self,
+        filepath: str = HISTORY_FILE,
+        gist_id: str = GIST_ID,
+        gist_token: str = GIST_TOKEN,
+        gist_filename: str = GIST_FILENAME,
+        max_size: int = MAX_HISTORY_SIZE,
+    ):
         self.filepath = filepath
+        self.gist_id = gist_id
+        self.gist_token = gist_token
+        self.gist_filename = gist_filename
+        self.max_size = max_size
         self.history: List[str] = self._load()
 
+    def _get_gist_headers(self) -> Dict[str, str]:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "ae-rss-bot",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if self.gist_token:
+            headers["Authorization"] = f"Bearer {self.gist_token}"
+        return headers
+
+    def _load_from_gist(self) -> Optional[List[str]]:
+        if not self.gist_id:
+            return None
+
+        url = f"https://api.github.com/gists/{self.gist_id}"
+        try:
+            resp = requests.get(url, headers=self._get_gist_headers(), timeout=15)
+            if resp.status_code == 200:
+                gist_data = resp.json()
+                files = gist_data.get("files", {})
+                
+                # Match filename exactly or case-insensitively
+                file_info = None
+                for fname, finfo in files.items():
+                    if fname.lower() == self.gist_filename.lower():
+                        file_info = finfo
+                        break
+
+                if file_info:
+                    raw_content = file_info.get("content")
+                    if raw_content is None and file_info.get("raw_url"):
+                        raw_resp = requests.get(
+                            file_info["raw_url"],
+                            headers=self._get_gist_headers(),
+                            timeout=15,
+                        )
+                        raw_content = raw_resp.text
+                    if raw_content:
+                        data = json.loads(raw_content)
+                        if isinstance(data, list):
+                            logger.info(
+                                f"Successfully loaded {len(data)} item IDs from GitHub Gist "
+                                f"({self.gist_id}/{self.gist_filename})."
+                            )
+                            return [str(x) for x in data]
+                else:
+                    logger.warning(
+                        f"Gist '{self.gist_id}' found, but file '{self.gist_filename}' does not exist in it yet."
+                    )
+                    return []
+            else:
+                logger.error(
+                    f"Failed to fetch GitHub Gist {self.gist_id}: HTTP {resp.status_code} - {resp.text}"
+                )
+        except Exception as e:
+            logger.error(f"Error fetching history from GitHub Gist: {e}")
+        return None
+
+    def _create_gist_if_needed(self, initial_data: List[str]) -> Optional[str]:
+        """Auto-creates a private Gist if GIST_TOKEN is provided but GIST_ID is empty."""
+        if not self.gist_token or self.gist_id:
+            return self.gist_id
+
+        url = "https://api.github.com/gists"
+        payload = {
+            "description": "ae-rss bot history tracking",
+            "public": False,
+            "files": {
+                self.gist_filename: {
+                    "content": json.dumps(initial_data, indent=2)
+                }
+            },
+        }
+        try:
+            resp = requests.post(
+                url, json=payload, headers=self._get_gist_headers(), timeout=15
+            )
+            if resp.status_code in (200, 201):
+                new_id = resp.json().get("id")
+                logger.info(
+                    f"✨ Automatically created new private GitHub Gist for history: {new_id}. "
+                    f"Set GIST_ID={new_id} in your environment variables."
+                )
+                self.gist_id = new_id
+                return new_id
+            else:
+                logger.error(f"Failed to auto-create GitHub Gist: HTTP {resp.status_code} - {resp.text}")
+        except Exception as e:
+            logger.error(f"Error auto-creating GitHub Gist: {e}")
+        return None
+
+    def _save_to_gist(self, data: List[str]) -> bool:
+        if not self.gist_token:
+            return False
+
+        if not self.gist_id:
+            created_id = self._create_gist_if_needed(data)
+            return bool(created_id)
+
+        url = f"https://api.github.com/gists/{self.gist_id}"
+        payload = {
+            "files": {
+                self.gist_filename: {
+                    "content": json.dumps(data, indent=2)
+                }
+            }
+        }
+        try:
+            resp = requests.patch(
+                url, json=payload, headers=self._get_gist_headers(), timeout=15
+            )
+            if resp.status_code == 200:
+                logger.info(
+                    f"Successfully synced {len(data)} item IDs to GitHub Gist ({self.gist_id}/{self.gist_filename})."
+                )
+                return True
+            else:
+                logger.error(
+                    f"Failed to update GitHub Gist {self.gist_id}: HTTP {resp.status_code} - {resp.text}"
+                )
+        except Exception as e:
+            logger.error(f"Error saving history to GitHub Gist: {e}")
+        return False
+
     def _load(self) -> List[str]:
+        # 1. Attempt Gist sync first if GIST_ID is configured
+        if self.gist_id:
+            gist_items = self._load_from_gist()
+            if gist_items is not None:
+                # Cache remotely fetched items locally
+                try:
+                    os.makedirs(os.path.dirname(os.path.abspath(self.filepath)), exist_ok=True)
+                    with open(self.filepath, "w", encoding="utf-8") as f:
+                        json.dump(gist_items[-self.max_size:], f, indent=2)
+                except Exception:
+                    pass
+                return gist_items
+
+        # 2. Fallback to local file
         if not os.path.exists(self.filepath):
             os.makedirs(os.path.dirname(os.path.abspath(self.filepath)), exist_ok=True)
             return []
@@ -448,21 +607,27 @@ class HistoryManager:
         return []
 
     def save(self) -> None:
+        trimmed = self.history[-self.max_size:]
+        # 1. Local filesystem persistence
         try:
             os.makedirs(os.path.dirname(os.path.abspath(self.filepath)), exist_ok=True)
-            trimmed = self.history[-MAX_HISTORY_SIZE:]
             with open(self.filepath, "w", encoding="utf-8") as f:
                 json.dump(trimmed, f, indent=2)
-            logger.info(f"Saved {len(trimmed)} item IDs to history ({self.filepath}).")
+            logger.info(f"Saved {len(trimmed)} item IDs to local history ({self.filepath}).")
         except Exception as e:
             logger.error(f"Failed to save history to '{self.filepath}': {e}")
 
+        # 2. Remote GitHub Gist synchronization
+        if self.gist_token:
+            self._save_to_gist(trimmed)
+
     def is_seen(self, item_id: str) -> bool:
-        return item_id in self.history
+        return str(item_id) in self.history
 
     def add(self, item_id: str) -> None:
-        if item_id not in self.history:
-            self.history.append(str(item_id))
+        sid = str(item_id)
+        if sid not in self.history:
+            self.history.append(sid)
 
 
 class TelegramPublisher:
