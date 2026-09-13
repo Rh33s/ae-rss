@@ -91,7 +91,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 HISTORY_FILE = os.getenv("HISTORY_FILE", "data/history.json")
 MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "10"))
-INITIAL_POST_LIMIT = int(os.getenv("INITIAL_POST_LIMIT", "20"))
+INITIAL_POST_LIMIT = int(os.getenv("INITIAL_POST_LIMIT", "0"))
 MAX_HISTORY_SIZE = int(os.getenv("MAX_HISTORY_SIZE", "1000"))
 MAX_CAPS_IN_SLIDESHOW = int(os.getenv("MAX_CAPS_IN_SLIDESHOW", "6"))
 MAX_SCENE_CAPS = int(os.getenv("MAX_SCENE_CAPS", "4"))
@@ -823,16 +823,20 @@ def run_once(args) -> None:
         return
 
     if is_initial_run:
-        logger.info(
-            f"Initial run: Limiting to {INITIAL_POST_LIMIT} items; "
-            f"marking {max(0, len(new_items) - INITIAL_POST_LIMIT)} items as seen."
-        )
-        to_broadcast = new_items[:INITIAL_POST_LIMIT]
-        to_seed = new_items[INITIAL_POST_LIMIT:]
-        for it in to_seed:
-            history.add(it["id"])
+        if INITIAL_POST_LIMIT > 0:
+            logger.info(
+                f"Initial run: Limiting to {INITIAL_POST_LIMIT} items; "
+                f"marking {max(0, len(new_items) - INITIAL_POST_LIMIT)} items as seen."
+            )
+            to_broadcast = new_items[:INITIAL_POST_LIMIT]
+            to_seed = new_items[INITIAL_POST_LIMIT:]
+            for it in to_seed:
+                history.add(it["id"])
+        else:
+            logger.info(f"Initial run: Broadcasting ALL {len(new_items)} feed items without limit.")
+            to_broadcast = new_items
     else:
-        to_broadcast = new_items[:args.limit]
+        to_broadcast = new_items[:args.limit] if args.limit > 0 else new_items
 
     to_broadcast.reverse()
 
