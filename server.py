@@ -380,7 +380,7 @@ def run_server(port: int = PORT, host: str = HOST):
     logger.info(f"Clean XML Feed Server listening on http://{host}:{port}")
     logger.info(f"Clean XML endpoint available at: http://{host}:{port}/clean.xml")
 
-    if os.getenv("RUN_BOT", "").lower() in ("1", "true", "yes"):
+    if os.getenv("RUN_BOT", "true").lower() in ("1", "true", "yes"):
         interval = int(os.getenv("POLL_INTERVAL_SECONDS", "1800"))
         _start_background_bot_thread(interval)
 

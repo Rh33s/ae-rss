@@ -1099,9 +1099,24 @@ def run_once(args) -> None:
     logger.info(f"Finished processing. Successfully posted {posted_count} items.")
     history.save()
 
+    _bot_telemetry["last_poll"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    _bot_telemetry["last_posted_count"] = posted_count
+    _bot_telemetry["total_posted"] += posted_count
+    _bot_telemetry["history_size"] = len(history.history)
+
+
+_bot_telemetry: Dict[str, Any] = {
+    "status": "running",
+    "service": "ae-rss-bot",
+    "uptime_start": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+    "last_poll": None,
+    "last_posted_count": 0,
+    "total_posted": 0,
+}
+
 
 def _start_health_server_if_needed() -> None:
-    """Starts a minimal background HTTP health check server if PORT is defined (e.g. Render Web Service)."""
+    """Starts a lightweight HTTP server on PORT for Render Web Service health checks and dashboard."""
     port_str = os.getenv("PORT", "").strip()
     if not port_str:
         return
@@ -1116,9 +1131,11 @@ def _start_health_server_if_needed() -> None:
     class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            self.wfile.write(b'{"status": "ok", "service": "ae-rss-bot"}\n')
+            body = json.dumps(_bot_telemetry, indent=2).encode("utf-8")
+            self.wfile.write(body)
 
         def log_message(self, format, *args):
             pass
@@ -1151,15 +1168,20 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.loop > 0:
-        logger.info(f"Starting continuous polling mode (interval: {args.loop} seconds)...")
+    loop_interval = args.loop
+    if loop_interval <= 0 and os.getenv("PORT"):
+        loop_interval = int(os.getenv("POLL_INTERVAL_SECONDS", "1800"))
+        logger.info(f"Cloud/Render environment detected (PORT={os.getenv('PORT')}). Automatically enabling continuous polling (interval: {loop_interval}s).")
+
+    if loop_interval > 0:
+        logger.info(f"Starting continuous polling mode (interval: {loop_interval} seconds)...")
         while True:
             try:
                 run_once(args)
             except Exception as e:
                 logger.error(f"Unexpected error in polling cycle: {e}")
-            logger.info(f"Sleeping for {args.loop} seconds until next check...")
-            time.sleep(args.loop)
+            logger.info(f"Sleeping for {loop_interval} seconds until next check...")
+            time.sleep(loop_interval)
     else:
         run_once(args)
 
